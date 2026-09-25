@@ -320,7 +320,8 @@ def process_and_plot_dynamic_rho(shots_and_radii, time_limit=9.0, bucket_size=0.
 if __name__ == "__main__":
     my_shots = {
         53037: 95,
-        53038: 90
+        53038: 90,
+        53039: 85
     }
 
     process_and_plot_dynamic_rho(my_shots)
