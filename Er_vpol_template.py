@@ -1,0 +1,297 @@
+import pandas as pd
+import numpy as np
+import requests
+import io
+
+# ==========================================
+# EDITABLE BLOCK 1: Mathematical Operation
+# ==========================================
+ALPHA_VAL = 2.0
+ALPHA_ERR = 0.2
+
+def custom_math_operation(bpp, lp):
+    """
+    f(bpp, lp) definition
+    """
+    return bpp
+
+function_name = r"$\Phi$ [V]"
+
+
+# ==========================================
+# EDITABLE BLOCK 2: GOLEM Web Endpoint Templates
+# ==========================================
+# Default URL endpoints for probe diagnostics on the GOLEM server.
+# Adjust sub-paths if your specific diagnostic files are named/located differently.
+BPP_URL_TEMPLATE = "http://golem.fjfi.cvut.cz/shots/{shot}/Diagnostics/DoubleLangBallPenProbe/BPP_LFS.csv"
+LP_URL_TEMPLATE = "http://golem.fjfi.cvut.cz/shots/{shot}/Diagnostics/DoubleLangBallPenProbe/LP_right.csv"
+BT_URL_TEMPLATE = "http://golem.fjfi.cvut.cz/shots/{shot}/Diagnostics/BasicDiagnostics/Results/Bt.csv"
+
+
+# ==========================================
+# EDITABLE BLOCK 3: Plasma Shift Thresholds
+# ==========================================
+# Discard any data where the absolute shift |dz| or |dr| exceeds this limit (in mm)
+DZ_MAX_THRESHOLD_MM = 30.0 
+
+# Units multiplier for camera shift (1000.0 if meters, 1.0 if mm)
+DZ_UNIT_MULTIPLIER = 1.0 
+
+
+# ==========================================
+# EDITABLE BLOCK 4: Custom Time Intervals
+# ==========================================
+# Define macro-intervals (start_time_ms, end_time_ms) to plot as distinct series.
+custom_intervals = [
+    (2.5, 3.5),
+    (3.5, 4.5),
+    (4.5, 5.5)
+]
+
+
+def fetch_golem_csv(url, col_names=None):
+    """
+    Helper function to fetch and parse space/comma-delimited CSVs directly from GOLEM.
+    """
+    response = requests.get(url, timeout=10)
+    response.raise_for_status()
+    
+    if col_names:
+        df = pd.read_csv(io.StringIO(response.text), sep=r'[,\s]+', engine='python', header=None, names=col_names)
+    else:
+        df = pd.read_csv(io.StringIO(response.text), sep=r'[,\s]+', engine='python')
+    return df
+
+
+def process_and_plot_dynamic_rho(shots_and_radii, time_limit=9.0, bucket_size=0.25):
+    all_averaged_data = []
+
+    # ==========================================
+    # STEP 1: Process, Fetch Web Data, Merge, and Bucket
+    # ==========================================
+    for shot, r_nominal in shots_and_radii.items():
+        print(f"\n--- SHOT {shot} DIAGNOSTICS ---")
+
+        # --- 1A: Fetch Probe Data Directly from GOLEM ---
+        bpp_url = BPP_URL_TEMPLATE.format(shot=shot)
+        lp_url = LP_URL_TEMPLATE.format(shot=shot)
+
+        try:
+            df_bpp = fetch_golem_csv(bpp_url)
+            df_lp = fetch_golem_csv(lp_url)
+
+            df_bpp.rename(columns={df_bpp.columns[0]: 't', df_bpp.columns[1]: 'bpp'}, inplace=True)
+            df_lp.rename(columns={df_lp.columns[0]: 't', df_lp.columns[1]: 'lp'}, inplace=True)
+
+            df_bpp['t'] = pd.to_numeric(df_bpp['t'], errors='coerce')
+            df_bpp['bpp'] = pd.to_numeric(df_bpp['bpp'], errors='coerce')
+            df_lp['t'] = pd.to_numeric(df_lp['t'], errors='coerce')
+            df_lp['lp'] = pd.to_numeric(df_lp['lp'], errors='coerce')
+
+            df_bpp.dropna(inplace=True)
+            df_lp.dropna(inplace=True)
+
+        except Exception as e:
+            print(f"Warning: Could not retrieve probe data for shot {shot}. Skipping. Error: {e}")
+            continue
+
+        # Oscilloscope scale multiplier = 100
+        df_bpp['bpp'] = df_bpp['bpp'] * 100 
+        df_lp['lp'] = df_lp['lp'] * 100
+
+        if df_bpp['t'].max() < 2.0:
+            df_bpp['t'] *= 1000.0
+            df_lp['t'] *= 1000.0
+
+        df_bpp = df_bpp.sort_values('t')
+        df_lp = df_lp.sort_values('t')
+
+
+        # --- 1B: Fetch Fast Camera Data ---
+        url_dz = f"http://golem.fjfi.cvut.cz/shots/{shot}/Diagnostics/FastCameras/Camera_Vertical/CameraVerticalPosition"
+        try:
+            df_dz = fetch_golem_csv(url_dz, col_names=['t', 'dz'])
+            df_dz['t'] = pd.to_numeric(df_dz['t'], errors='coerce')
+            df_dz['dz'] = pd.to_numeric(df_dz['dz'], errors='coerce')
+            df_dz.dropna(inplace=True)
+
+            if df_dz.empty:
+                print(f"Shot {shot}: Vertical camera data is empty after parsing. Skipping.")
+                continue
+
+            if df_dz['t'].max() < 2.0:
+                df_dz['t'] *= 1000.0
+
+            df_dz['dz'] *= DZ_UNIT_MULTIPLIER
+            print(f"Max Absolute Shift (|dz|): {df_dz['dz'].abs().max():.2f} mm")
+
+            df_dz = df_dz[df_dz['dz'].abs() <= DZ_MAX_THRESHOLD_MM].sort_values('t')
+
+            if df_dz.empty:
+                print(f"Shot {shot}: All dz data dropped exceeding {DZ_MAX_THRESHOLD_MM}mm limit!")
+                continue
+
+        except Exception as e:
+            print(f"Warning: Could not retrieve vertical camera data for shot {shot}. Error: {e}")
+            continue
+
+        url_dr = f"http://golem.fjfi.cvut.cz/shots/{shot}/Diagnostics/FastCameras/Camera_Radial/CameraRadialPosition"
+        try:
+            df_dr = fetch_golem_csv(url_dr, col_names=['t', 'dr'])
+            df_dr['t'] = pd.to_numeric(df_dr['t'], errors='coerce')
+            df_dr['dr'] = pd.to_numeric(df_dr['dr'], errors='coerce')
+            df_dr.dropna(inplace=True)
+
+            if df_dr.empty:
+                print(f"Shot {shot}: Radial camera data is empty after parsing. Skipping.")
+                continue
+
+            if df_dr['t'].max() < 2.0:
+                df_dr['t'] *= 1000.0
+
+            df_dr['dr'] *= DZ_UNIT_MULTIPLIER
+            print(f"Max Absolute Shift (|dr|): {df_dr['dr'].abs().max():.2f} mm")
+
+            df_dr = df_dr[df_dr['dr'].abs() <= DZ_MAX_THRESHOLD_MM].sort_values('t')
+
+            if df_dr.empty:
+                print(f"Shot {shot}: All dr data dropped exceeding {DZ_MAX_THRESHOLD_MM}mm limit!")
+                continue
+
+        except Exception as e:
+            print(f"Warning: Could not retrieve radial camera data for shot {shot}. Error: {e}")
+            continue
+
+
+        # --- 1C: Fetch Toroidal Magnetic Field Data ---
+        bt_url = BT_URL_TEMPLATE.format(shot=shot)
+        try:
+            df_bt = fetch_golem_csv(bt_url, col_names=['t', 'bt'])
+            df_bt['t'] = pd.to_numeric(df_bt['t'], errors='coerce')
+            df_bt['bt'] = pd.to_numeric(df_bt['bt'], errors='coerce')
+            df_bt.dropna(inplace=True)
+
+            if df_bt['t'].max() < 2.0:
+                df_bt['t'] *= 1000.0
+
+            df_bt = df_bt.sort_values('t')
+
+        except Exception as e:
+            print(f"Warning: Could not retrieve Bt data for shot {shot}. Error: {e}")
+            continue
+
+
+        # --- 1D: Merge Probes, Camera, and Bt Data ---
+        df = pd.merge_asof(df_bpp, df_lp, on='t', direction='nearest', tolerance=0.01)
+        df = pd.merge_asof(df, df_dz, on='t', direction='nearest', tolerance=0.01)
+        df = pd.merge_asof(df, df_dr, on='t', direction='nearest', tolerance=0.01)
+        df = pd.merge_asof(df, df_bt, on='t', direction='nearest', tolerance=0.01)
+
+        # Prevent artificial backward shifting before camera triggers
+        first_cam_t_z = df_dz['t'].min()
+        first_cam_t_r = df_dr['t'].min()
+
+        df.loc[df['t'] < first_cam_t_z, 'dz'] = 0.0
+        df.loc[df['t'] < first_cam_t_r, 'dr'] = 0.0
+
+        rows_before = len(df)
+        df.dropna(inplace=True)
+        rows_after = len(df)
+
+        print(f"Probe Time Range : {df_bpp['t'].min():.2f} to {df_bpp['t'].max():.2f} ms")
+        print(f"Camera Time Range: {df_dz['t'].min():.2f} to {df_dz['t'].max():.2f} ms")
+        print(f"Rows before drop: {rows_before} | Rows after drop: {rows_after}")
+
+
+        # --- 1E: Calculate Physical Variables ---
+        df['rho'] = ((r_nominal + df['dz'])**2 + (df['dr'] - 3)**2)**(1/2)
+        df['result'] = custom_math_operation(df['bpp'], df['lp'])
+        df = df[df['t'] <= time_limit]
+
+
+        # --- 1F: Bucket into Time Intervals ---
+        df['time_bucket'] = np.floor(df['t'] / bucket_size) * bucket_size
+        grouped = df.groupby('time_bucket')
+
+        bucketed_df = grouped.agg(
+            rho_mean=('rho', 'mean'),
+            result_mean=('result', 'mean'),
+            result_std=('result', 'std'),
+            bt_mean=('bt', 'mean'),
+            bt_std=('bt', 'std')
+        ).reset_index()
+
+        fractional_error = ALPHA_ERR / ALPHA_VAL
+        bucketed_df['result_std'] = np.sqrt(
+            bucketed_df['result_std']**2 + (bucketed_df['result_mean'] * fractional_error)**2
+        )
+
+        bucketed_df['shot'] = shot
+        all_averaged_data.append(bucketed_df)
+
+    if not all_averaged_data:
+        print("No valid data processed. Check shot numbers and internet connection.")
+        return
+    
+    # ==========================================
+    # STEP 2: Aggregate Macro-Intervals and Plot
+    # ==========================================
+    master_df = pd.concat(all_averaged_data)
+
+    for i, (start_t, end_t) in enumerate(custom_intervals):
+        interval_data = master_df[(master_df['time_bucket'] >= start_t) & (master_df['time_bucket'] < end_t)]
+
+        if interval_data.empty:
+            continue
+
+        grouped_shot = interval_data.groupby('shot')
+
+        plot_df = grouped_shot.agg(
+            x_rho=('rho_mean', 'mean'),
+            y_val=('result_mean', 'mean'),
+            y_err=('result_std', lambda x: np.sqrt((x**2).sum()) / len(x)),
+            y_bt=('bt_mean', 'mean'),
+            y_bt_err=('bt_std', lambda x: np.sqrt((np.nan_to_num(x)**2).sum()) / len(x))
+        ).reset_index()
+
+        plot_df = plot_df.sort_values('x_rho')
+
+        if len(plot_df) < 2:
+            print(f"Not enough points to calculate v_pol for {start_t}-{end_t} ms. Skipping.")
+            continue
+
+        # 1. Spatial Calculation: Er = -d(Phi)/d(rho)
+        plot_df['E_r'] = -np.gradient(plot_df['y_val'], plot_df['x_rho'])
+
+        drho_spacing = np.gradient(plot_df['x_rho'])
+        plot_df['E_r_err'] = (np.sqrt(2) * plot_df['y_err'] / np.abs(drho_spacing))
+
+        # 2. Mixed Calculation: v_pol = Er / Bt
+        plot_df['v_pol'] = plot_df['E_r'] / plot_df['y_bt']
+
+        rel_err_Er = plot_df['E_r_err'] / np.abs(plot_df['E_r'])
+        rel_err_Bt = plot_df['y_bt_err'] / np.abs(plot_df['y_bt'])
+        plot_df['v_pol_err'] = np.abs(plot_df['v_pol']) * np.sqrt(rel_err_Er**2 + rel_err_Bt**2)
+
+
+    # Formatted console output with dynamic function_name column
+        print(f"\n=======================================================")
+        print(f" time interval: {start_t} - {end_t} ms")
+        print(f"=======================================================")
+        print(f"{'rho [mm]':>8} | {function_name:>12} | {'E_r [kV/m]':>12} | {'v_pol [km/s]':>12}")
+        print("-" * 55)
+        for _, row in plot_df.iterrows():
+            func_val_str = f"{row['y_val']:.2f} ± {row['y_err']:.2f}"
+            E_r_str = f"{row['E_r']:.2f} ± {row['E_r_err']:.2f}"
+            v_pol_str = f"{row['v_pol']:.2f} ± {row['v_pol_err']:.2f}"
+            print(f"{row['x_rho']:8.2f} | {func_val_str:>12} | {E_r_str:>12} | {v_pol_str:>12}")
+
+# === EXECUTION BLOCK ===
+if __name__ == "__main__":
+    my_shots = {
+        53037: 95,
+        53038: 90,
+        53039: 85
+    }
+
+    process_and_plot_dynamic_rho(my_shots)
